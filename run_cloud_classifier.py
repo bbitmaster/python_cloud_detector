@@ -1,7 +1,9 @@
 import cloud_fcns as cloud
+from cloud_fcns import writedot
 import h5py
 import sys
 import numpy as np
+import time
 
 use_sample_storage = True  #off by default - below import may turn on
 from cloud_params import *
@@ -13,179 +15,198 @@ inputsize = 7*patchsize**2
 
 offset = (patchsize-1)/2;
 
-d = cloud.load_all_data(data_path,2)
+d = cloud.load_all_data(data_path)
+load_cache = False
 if(use_sample_storage):
 	#d is a tuple containing (A_list,MASK_list,MASKF_list)
 	print('creating h5py sample file: ' + cloud.get_sample_fname())
-	cache_file = h5py.File(cloud.get_sample_fname(),'w')
+	cache_file = h5py.File(cloud.get_sample_fname(),'a')
 
-	#40 images to load @ 1000x1000
-	#cautiously allow a 3x margin of error
-	estimated_sample_size = len(d[0])*1000.0*1000.0*load_percentage*3/batchsize
+	if('final' in cache_file):
+		load_cache = True
+	else:
+		#we may have a file that wasn't finished saving... need to truncate
+		cache_file.close()
+		cache_file = h5py.File(cloud.get_sample_fname(),'w')
+
+		#40 images to load @ 1000x1000
+		#cautiously allow a 3x margin of error
+		estimated_sample_size = int(len(d[0])*1000.0*1000.0*load_percentage*3/num_batches)
+		sample_list_file = [];
+		class_list_file = [];
+		for i in range(num_batches):
+			sample_list_file.append(cache_file.create_dataset('sample_list_' + str(i),(estimated_sample_size,inputsize),chunks=(chunk_size,inputsize),dtype=np.float32))
+			class_list_file.append(cache_file.create_dataset('class_list_' + str(i),(estimated_sample_size,3),chunks=(chunk_size,3),dtype=np.uint8))
+
+		sample_file_size = list(np.zeros(50,dtype=np.uint32));
+
+if(load_cache):
+	print('h5py file found. loading...')
 	sample_list_file = [];
 	class_list_file = [];
 	for i in range(num_batches):
-		sample_list_file.append(cache_file.create_dataset('sample_list_' + str(i),(estimated_sample_size,inputsize),chunks=(10000,inputsize),dtype=np.float32))
-		class_list_file.append(cache_file.create_dataset('class_list_' + str(i),(estimated_sample_size,3),chunks=(10000,3),dtype=np.uint8))
+		sample_list_file.append(cache_file['sample_list_' + str(i)])
+		class_list_file.append(cache_file['class_list_' + str(i)])
+	sample_mean = np.array(cache_file['sample_mean'])
+	sample_std = np.array(cache_file['sample_std'])
+	sample_list_test = np.array(cache_file['sample_list_test'])
+	class_list_test = np.array(cache_file['class_list_test'])
+else:
+	sample_list = []
+	class_list = []
+	sample_list_test = []
+	class_list_test = []
 
-	sample_file_size = list(np.zeros(50));
-
-sample_list = []
-class_list = []
-sample_list_validation = []
-class_list_validation = []
-
-for i in range(len(d[0])):
-	sys.stdout.write('\nsampling image: '+ str(i));
-	A = d[0][0]
-	MASK = d[1][0]
-	MASKF = d[2][0]
-	fname = d[3][0]
-	#remove the first element from the list and from memory
-	#to save memory as we go.
-	del d[0][0]
-	del d[1][0]
-	del d[2][0]
-	del d[3][0]
+	for i in range(len(d[0])):
+		sys.stdout.write('\nsampling image: '+ str(i));
+		A = d[0][0]
+		MASK = d[1][0]
+		MASKF = d[2][0]
+		fname = d[3][0]
+		#remove the first element from the list and from memory
+		#to save memory as we go.
+		del d[0][0]
+		del d[1][0]
+		del d[2][0]
+		del d[3][0]
 
 
-	#validation set comes from p31r43
-	is_validation = False
-	if(fname.startswith('p31r43')):
-		print('sampling validation')
-		is_validation = True
+		#test set comes from p31r43
+		is_test = False
+		if(fname.startswith('p31r43')):
+			sys.stdout.write('test set')
+			is_test = True
 
-	imsize_x = A.shape[1];
-	imsize_y = A.shape[2];
-	for x in range(offset,imsize_x-offset):
-		if(x%20 == 0):
-			sys.stdout.write('.');
-			sys.stdout.flush();
-		for y in range(offset,imsize_y-offset):
-			if(np.random.rand() > load_percentage):
-				continue;
-			sample = A[:,x-offset:x+offset+1,y-offset:y+offset+1]
-			sample = np.reshape(sample,inputsize)
-			c = MASK[x,y];
-			class_max = np.zeros(3);
-			class_max[0] = c&1; #shadow
-			class_max[1] = (c&8)>>3 | (c&16)>>4; #cloud (thick or thin)
-			class_max[2] = (c&128)>>7; #clear sky
-			if(not is_validation):
-				sample_list.append(sample)
-				class_list.append(class_max);
-			else:
-				sample_list_validation.append(sample)
-				class_list_validation.append(class_max);
-	#save sample_list for this image  h5py file
+		if(not is_test):
+			[sample_list,class_list] = cloud.sample_img(A,MASK,load_percentage)
+		else:
+			[sample_list_test_extend,class_list_test_extend] = cloud.sample_img(A,MASK,load_percentage)
+			sample_list_test.extend(sample_list_test_extend)
+			class_list_test.extend(class_list_test_extend)
+			del sample_list_test_extend
+			del class_list_test_extend
+
+		#save sample_list for this image  h5py file
+		if use_sample_storage:
+			sample_list = sample_list
+			class_list = class_list
+			sample_size = len(sample_list);
+			#sample_list = np.array(sample_list)
+			#class_list = np.array(class_list)
+			#sample_size = sample_list.shape[0];
+
+			#append peices of sample_list to all batches
+			chunk_size = chunk_append_size
+			while sample_size > 0:
+				if(chunk_size > sample_size):
+					chunk_size = sample_size
+				b = np.random.randint(num_batches)
+				#if the below line crashes with "zero-length selections are not allowed"
+				#it means the estimated sample size was too small
+				sample_list_file[b][sample_file_size[b]:sample_file_size[b] + chunk_size,:] = sample_list[sample_size - chunk_size:sample_size]
+				class_list_file[b][sample_file_size[b]:sample_file_size[b] + chunk_size,:] = class_list[sample_size - chunk_size:sample_size]
+				sample_file_size[b] += chunk_size
+				sample_size -= chunk_size
+			del sample_list
+			del class_list
+			sample_list = []
+			class_list = []
+	del A
+	del MASKF
+	del MASK
+
 	if use_sample_storage:
+		sys.stdout.write('\nreshaping h5py')
+		for i, s in enumerate(sample_file_size):
+			sample_list_file[i].resize((sample_file_size[i],inputsize))
+			class_list_file[i].resize((sample_file_size[i],3))
+			writedot()
+
+		sys.stdout.write('\ncalculating mean and std from h5py dataset')
+		sample_mean = np.zeros(inputsize)
+		sample_std = np.zeros(inputsize)
+		for i in range(len(sample_file_size)):
+			sample_list = np.array(sample_list_file[i])
+			sample_mean += np.mean(sample_list,0)
+			sample_std += np.std(sample_list,0)
+			writedot()
+		sample_mean /= len(sample_file_size)
+		sample_std /= len(sample_file_size)
+
+		sys.stdout.write('\nnormalizing data')
+		for i in range(len(sample_file_size)):
+			sample_list_file[i][:] = sample_list_file[i][:] - sample_mean
+			sample_list_file[i][:] = sample_list_file[i][:]/sample_std
+			writedot()
+		
+		sample_list_test = np.array(sample_list_test)
+		class_list_test = np.array(class_list_test)
+
+		sample_list_test = sample_list_test - sample_mean
+		sample_list_test = sample_list_test/sample_std
+
+		sys.stdout.write('\nshuffling data h5py (could be slow)')
+		#we need to shuffle both class and sample together in unison
+		#to do this we reset the random number generator state
+		for i in range(len(sample_file_size)):
+			sample_list = np.array(sample_list_file[i])
+			class_list = np.array(class_list_file[i])
+			rng_state = np.random.get_state()
+			np.random.shuffle(sample_list)
+			np.random.set_state(rng_state)
+			np.random.shuffle(class_list)
+			sample_list[:] = sample_list
+			class_list[:] = class_list
+			writedot()
+
+		print('\ncreating test set')
+
+		#print('training size: ' + str(sample_list_file.shape[0]))
+		#print('test size: ' + str(sample_list_test.shape[0]))
+		#print('validation size: ' + str(sample_list_validation.shape[0]))
+		#save more stuff to the h5py file
+
+		print('saving stuff to h5py')
+		cache_file['sample_mean'] = sample_mean
+		cache_file['sample_std'] = sample_std
+		cache_file['sample_list_test'] = sample_list_test
+		cache_file['class_list_test'] = class_list_test
+
+		cache_file['final'] = np.array([1])
+		print('getting initial batch')
+		sample_list = np.array(sample_list_file[0])
+		class_list = np.array(class_list_file[0])
+	else:
+		print('\nreshaping...')
 		sample_list = np.array(sample_list)
 		class_list = np.array(class_list)
-		sample_size = sample_list.shape[0];
+		
+		print('calculating mean and std...')
+		sample_mean = np.mean(sample_list,0)
+		sample_std = np.std(sample_list,0)
 
-		#append peices of sample_list to all batches
-		while sample_size > 0:
-			chunk_size = 1000
-			for b in range(num_batches):
-				sample_list_file[b][sample_file_size[b]:new_sample_file_size,:] = sample_list
-				class_list_file[sample_file_size:new_sample_file_size,:] = class_list
-				sample_file_size = new_sample_file_size
-				sample_list = []
-				class_list = []
-del A
-del MASKF
-del MASK
+		print('normalizing data...')
+		sample_list = sample_list - sample_mean
+		sample_list = sample_list/sample_std
 
-if use_sample_storage:
-	print('\nreshaping h5py...')
-	sample_list_file.resize((sample_file_size,inputsize))
-	class_list_file.resize((sample_file_size,3))
+		print('shuffling data...')
+		#we need to shuffle both class and sample together in unison
+		#to do this we reset the random number generator state
+		rng_state = np.random.get_state()
+		np.random.shuffle(sample_list)
+		np.random.set_state(rng_state)
+		np.random.shuffle(class_list)
 
-	print('calculating mean and std from h5py dataset')
-	sample_mean = np.mean(sample_list_file,0)
-	sample_std = np.std(sample_list_file,0)
-	
-	print('normalizing data...')
-	sample_list_file[:] = sample_list_file[:] - sample_mean
-	sample_list_file[:] = sample_list_file[:]/sample_std
-	
-	print('shuffling data h5py... (could be slow)')
-	#we need to shuffle both class and sample together in unison
-	#to do this we reset the random number generator state
-	rng_state = np.random.get_state()
-	np.random.shuffle(sample_list_file)
-	np.random.set_state(rng_state)
-	np.random.shuffle(class_list_file)
+		print('total number of samples: ' + str(sample_list.shape[0]))
+		print('creating testing set')
+		
+		sample_list_test = sample_list_validation
 
-	print('total number of samples: ' + str(sample_list_file.shape[0]))
-	print('creating testing set')
-	data_size = sample_list_file.shape[0];
+		train_size = sample_list.shape[0]
 
-	test_size = int(data_size*test_percent)
-
-	#get test data off of end of sample list
-	sample_list_test = sample_list_file[data_size - test_size:data_size]
-	sample_list_file.resize((data_size - test_size,inputsize))
-	
-	class_list_test = class_list_file[data_size - test_size:data_size]
-	class_list_file.resize((data_size - test_size,3))
-
-	train_size = sample_list_file.shape[0]
-
-	sample_list_validation = np.array(sample_list_validation);
-	print('training size: ' + str(sample_list_file.shape[0]))
-	print('test size: ' + str(sample_list_test.shape[0]))
-	print('validation size: ' + str(sample_list_validation.shape[0]))
-	#save more stuff to the h5py file
-
-	print('saving stuff to h5py')
-	f['sample_mean'] = sample_mean
-	f['sample_std'] = sample_std
-	f['sample_list_test'] = sample_list_test
-	f['class_list_test'] = class_list_test
-	f['sample_list_validation'] = sample_list_validation
-	f['class_list_validation'] = class_list_validation
-
-	print('getting initial batch')
-	if(batch_size > train_size):
-		batch_size = train_size
-	sample_list = np.array(sample_list_file[0:batch_size])
-	class_list = np.array(class_list_file[0:batch_size])
-else:
-	print('\nreshaping...')
-	sample_list = np.array(sample_list)
-	class_list = np.array(class_list)
-	
-	print('calculating mean and std...')
-	sample_mean = np.mean(sample_list,0)
-	sample_std = np.std(sample_list,0)
-
-	print('normalizing data...')
-	sample_list = sample_list - sample_mean
-	sample_list = sample_list/sample_std
-
-	print('shuffling data...')
-	#we need to shuffle both class and sample together in unison
-	#to do this we reset the random number generator state
-	rng_state = np.random.get_state()
-	np.random.shuffle(sample_list)
-	np.random.set_state(rng_state)
-	np.random.shuffle(class_list)
-
-	print('total number of samples: ' + str(sample_list.shape[0]))
-	print('creating testing set')
-	data_size = sample_list.shape[0];
-
-	test_size = int(data_size*test_percent)
-
-	[sample_list_test,sample_list] = np.split(sample_list,[test_size])
-	[class_list_test,class_list] = np.split(class_list,[test_size])
-
-	train_size = sample_list.shape[0]
-
-	print('training size: ' + str(sample_list.shape[0]))
-	print('test size: ' + str(sample_list_test.shape[0]))
-	print('validation size: ' + str(sample_list_validation.shape[0]))
+		print('training size: ' + str(sample_list.shape[0]))
+		print('validation size: ' + str(sample_list_validation.shape[0]))
+import pdb; pdb.set_trace()
 
 print('initializing network...')
 layers = [nnet.layer(inputsize)]
@@ -236,6 +257,7 @@ for i in range(training_epochs):
 	c = np.argmax(class_list_test,1);
 	test_correct = np.sum(c == guess)
 	net.train = True
+
 	#calculate (and print) test error
 	print('epoch ' + str(i) + ': training rate : ' + str(float(training_correct)/float(train_size)) + \
 			' test rate: ' + str(float(test_correct)/float(sample_list_test.shape[0])))
