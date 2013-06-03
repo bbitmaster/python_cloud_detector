@@ -46,26 +46,34 @@ def get_sample_fname():
 	fname = 'cloud_sample_cache_' + str(patchsize) + '_' + str(load_percentage) + '_' + str(randomseed1) + '.hdf5'
 	return os.path.join(sample_dir_name,fname)
 
-def sample_img(A,MASK,percent):
+def sample_img(A,MASK,class_percent):
 	inputsize = 7*patchsize**2
 	offset = (patchsize-1)/2;
 	imsize_x = A.shape[1];
 	imsize_y = A.shape[2];
 	sample_list = []
 	class_list = []
+	classes = np.zeros(256,dtype=np.float32)
+	classes[1] = 0
+	classes[8] = 1
+	classes[16] = 1
+	classes[128] = 2
 	for x in range(offset,imsize_x-offset):
 		if(x%20 == 0):
 			writedot()
 		for y in range(offset,imsize_y-offset):
-			if(np.random.rand() > percent):
-				continue;
-			sample = A[:,x-offset:x+offset+1,y-offset:y+offset+1]
-			sample = np.reshape(sample,inputsize)
+			#if(np.random.rand() > percent):
+			#	continue;
 			c = MASK[x,y];
-			class_max = np.zeros(3);
+			class_max = np.zeros(3,dtype=np.float32);
+			
 			class_max[0] = c&1; #shadow
 			class_max[1] = (c&8)>>3 | (c&16)>>4; #cloud (thick or thin)
 			class_max[2] = (c&128)>>7; #clear sky
+			if(np.random.rand() > class_percent[int(classes[int(c)])]):
+				continue;
+			sample = A[:,x-offset:x+offset+1,y-offset:y+offset+1]
+			sample = np.reshape(sample,inputsize)
 			sample_list.append(sample)
 			class_list.append(class_max);
 	return (sample_list, class_list)
@@ -93,18 +101,28 @@ def load_net(filename):
 	matlabdict = {}
 	scipy.io.loadmat(filename,matlabdict)
 	net = nnet
-	num_layers = matlabdict['num_layers']
-	layers = [nnet.layer(matlabdict['layer_node_count_input_1'])]
+	num_layers = matlabdict['num_layers'][0]
+	layers = [nnet.layer(matlabdict['layer_node_count_input_1'][0])]
 	for i in range(num_layers):
-		l = matlabdict['layer_node_count_output_' + str(i+1)]
+		l = matlabdict['layer_node_count_output_' + str(i+1)][0]
 		a = matlabdict['layer_activation_' + str(i+1)]
 		layers.append(nnet.layer(l,a))
 	net = nnet.net(layers)
 
+	for i in range(num_layers):
+		net.layer[i].weights = matlabdict['layer_weights_' + str(i+1)]
+		dropout = matlabdict['layer_dropout_' + str(i+1)][0]
+		if(dropout == 'None'):
+			#print('Layer ' + str(i) + ': Dropout is none')
+			net.layer[i].dropout = None
+		else:
+			#print('Layer ' + str(i) + ': Dropout: ' + str(dropout))
+			net.layer[i].dropout = float(dropout)
 	data = {}
 	data['net'] = net
 	data['sample_mean'] = matlabdict['sample_mean']
 	data['sample_std'] = matlabdict['sample_std']
 	data['patchsize'] = matlabdict['patchsize']
+	data['test_rate'] = matlabdict['test_rate']
 	return data
 
